@@ -275,6 +275,21 @@ footer b{color:var(--ink)}
   </div>
   <p class="hint" id="modelStatus" style="margin-top:8px"></p>
 </section>
+<section class="card reveal" id="llmCard">
+  <h3>🧠 Продвинутый разбор (LLM)</h3>
+  <p class="hint">Персональные объяснения и советы от языковой модели. Требуется WebGPU и загрузка ~400 МБ. Все вычисления локальны — данные не покидают устройство.</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+    <button class="btn green" id="loadLlmBtn">✨ Загрузить LLM</button>
+    <button class="btn ghost" id="unloadLlmBtn" disabled>🗑 Выгрузить</button>
+  </div>
+  <div id="llmProgress" style="display:none;margin-top:12px">
+    <div style="height:8px;border-radius:99px;background:#e9e6d8;overflow:hidden">
+      <i id="llmProgressBar" style="display:block;height:100%;width:0;background:var(--blue);transition:width .25s"></i>
+    </div>
+    <p class="hint" id="llmProgressText" style="margin-top:4px"></p>
+  </div>
+  <p class="hint" id="llmStatus" style="margin-top:8px"></p>
+</section>
 <div class="doodles" aria-hidden="true">
   <span style="top:18%;left:3%">E = mc²</span>
   <span style="top:52%;right:4%;font-size:60px">§ 12</span>
@@ -509,6 +524,9 @@ let modelLoading = false;
 let modelReady = false;
 let embeddingsCache = new Map();
 const EMBED_CACHE_MAX = 2000;
+let llmEngine = null;
+let llmReady = false;
+let llmLoading = false;
 const Auth={
   AK:"pk5_accounts",SK:"pk5_session",user:null,
   load(){try{return JSON.parse(localStorage.getItem(this.AK)||"{}")}catch(e){return{}}},
@@ -554,7 +572,29 @@ function waitForTransformers(timeoutMs = 20000) {
   });
   return transformersWaitPromise;
 }
-
+let webllmWaitPromise = null;
+function waitForWebLLM(timeoutMs = 20000) {
+  if (window.webllm && window.webllm.CreateMLCEngine) return Promise.resolve();
+  if (webllmWaitPromise) return webllmWaitPromise;
+  webllmWaitPromise = new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (err) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      window.removeEventListener("webllmLoaded", onOk);
+      window.removeEventListener("webllmFailed", onFail);
+      if (err) reject(err); else resolve();
+    };
+    const onOk = () => finish(null);
+    const onFail = (ev) => finish((ev && ev.detail) || new Error("WebLLM не загрузился"));
+    const timer = setTimeout(() => finish(new Error("WebLLM не загрузился за " + Math.round(timeoutMs/1000) + " с")), timeoutMs);
+    window.addEventListener("webllmLoaded", onOk);
+    window.addEventListener("webllmFailed", onFail);
+    if (window.webllm && window.webllm.CreateMLCEngine) onOk();
+  });
+  return webllmWaitPromise;
+}
 async function loadEmbeddingModel() {
   if (modelReady || modelLoading) return;
 
@@ -666,6 +706,70 @@ function unloadEmbeddingModel() {
   document.getElementById("modelProgress").style.display = "none";
   document.getElementById("modelStatus").textContent = "Семантическая проверка выключена.";
   toast("Модель выгружена. Используется быстрый LSA-режим.");
+}
+async function loadLlmModel() {
+  if (llmReady || llmLoading) return;
+  const btn = document.getElementById("loadLlmBtn");
+  const unloadBtn = document.getElementById("unloadLlmBtn");
+  const progressBox = document.getElementById("llmProgress");
+  const bar = document.getElementById("llmProgressBar");
+  const text = document.getElementById("llmProgressText");
+  const status = document.getElementById("llmStatus");
+
+  if (!navigator.gpu) {
+    status.textContent = "⚠ WebGPU не поддерживается этим браузером. Используется базовый разбор без LLM.";
+    return;
+  }
+
+  llmLoading = true;
+  btn.disabled = true;
+  progressBox.style.display = "block";
+  bar.style.width = "0%";
+  text.textContent = "Инициализация WebLLM…";
+  status.textContent = "";
+
+  try {
+    await waitForWebLLM();
+
+    const { CreateMLCEngine } = window.webllm;
+
+    llmEngine = await CreateMLCEngine("Qwen2.5-0.5B-Instruct-q4f16_1-MLC", {
+      initProgressCallback: (p) => {
+        try {
+          const pct = Math.round((p.progress || 0) * 100);
+          bar.style.width = pct + "%";
+          text.textContent = `${p.text || "Загрузка модели"} — ${pct}%`;
+        } catch (e) {}
+      }
+    });
+
+    llmReady = true;
+    btn.textContent = "✅ LLM загружена";
+    unloadBtn.disabled = false;
+    bar.style.width = "100%";
+    status.textContent = "Продвинутый разбор включён. Модель кэширована браузером, все вычисления — на устройстве.";
+    toast("✅ LLM загружена. Разбор станет подробнее.");
+  } catch (e) {
+    console.error("Ошибка загрузки LLM:", e);
+    text.textContent = "Ошибка: " + (e && e.message ? e.message : e);
+    status.innerHTML = "Не удалось загрузить LLM. Проверьте WebGPU, отключите блокировщики и попробуйте снова. Без LLM работает обычный разбор.";
+    btn.disabled = false;
+  } finally {
+    llmLoading = false;
+  }
+}
+
+function unloadLlmModel() {
+  llmEngine = null;
+  llmReady = false;
+  const btn = document.getElementById("loadLlmBtn");
+  const unloadBtn = document.getElementById("unloadLlmBtn");
+  btn.disabled = false;
+  btn.textContent = "✨ Загрузить LLM";
+  unloadBtn.disabled = true;
+  document.getElementById("llmProgress").style.display = "none";
+  document.getElementById("llmStatus").textContent = "Продвинутый разбор выключен.";
+  toast("LLM выгружена. Используется базовый разбор.");
 }
 const LEVELS=[{name:"Новичок",min:0},{name:"Ученик",min:5},{name:"Опытный",min:15},{name:"Знаток",min:30},{name:"Мастер",min:60},{name:"Легенда",min:100}];
 function levelFor(total){let idx=0;for(let i=0;i<LEVELS.length;i++){if(total>=LEVELS[i].min)idx=i;}const cur=LEVELS[idx];const next=LEVELS[idx+1]||null;return {idx,name:cur.name,min:cur.min,next};}
@@ -1598,6 +1702,8 @@ function adaptiveMultiplier(){
 }
 document.getElementById("loadModelBtn").addEventListener("click", loadEmbeddingModel);
 document.getElementById("unloadModelBtn").addEventListener("click", unloadEmbeddingModel);
+document.getElementById("loadLlmBtn").addEventListener("click", loadLlmModel);
+document.getElementById("unloadLlmBtn").addEventListener("click", unloadLlmModel);
 async function getEmbedding(text) {
   if (!embedder) throw new Error("Модель не загружена");
   const key = text.trim();
@@ -2412,6 +2518,22 @@ window.updateAnalysisProgress = (msg) => {
   const el = document.getElementById("checkHint");
   if (el) el.textContent = msg;
 };
+function buildLlmPrompt(d) {
+  const parts = [];
+  parts.push(`Тема: «${d.title}». Ученик рассказал ${d.words} слов.`);
+  parts.push(`Полнота: ${Math.round(d.coverage * 100)}%. Термины: ${Math.round(d.termCov * 100)}%.`);
+  if (d.secNone.length) parts.push(`Не рассказаны части: ${d.secNone.join(", ")}.`);
+  if (d.secPart.length) parts.push(`Частично раскрыты: ${d.secPart.join(", ")}.`);
+  if (d.contradictions.length) parts.push(`Противоречия: ${d.contradictions.join(" ")}`);
+  if (d.factIssues.length) parts.push(`Сомнительные даты: ${d.factIssues.join(", ")}.`);
+  if (d.plan) parts.push(`План ответа по частям: ${d.plan}.`);
+  parts.push(`Пересказ (начало): «${d.studentText}»`);
+  if (d.good.length || d.bad.length) {
+    parts.push(`Уже сформулированные наблюдения: ${d.good.concat(d.bad).slice(0, 3).join(" ")}`);
+  }
+  parts.push("Напиши 3 конкретных совета ученику: что улучшить и как. Опирайся только на данные выше, не выдумывай факты. Кратко, по-русски.");
+  return parts.join("\n");
+}
 async function analyze(){
   const text = tx.value, title = state.customTitle;
   const tokens = tokenize(text);
@@ -3108,7 +3230,33 @@ if (!useEmbFinal) {
     matchedS: s.matchedS, totalS: s.totalS,
     weight: s.weight, termCount: s.termCount
   }));
-
+  let llmExplanation = null;
+  if (llmReady && llmEngine) {
+    try {
+      const prompt = buildLlmPrompt({
+        title, words, coverage, termCov,
+        secNone: secNone.map(s => s.title),
+        secPart: secPart.map(s => s.title),
+        contradictions: contradictions.map(c => c.msg),
+        factIssues,
+        good, bad,
+        studentText: text.slice(0, 1500),
+        plan
+      });
+      const response = await llmEngine.chat.completions.create({
+        messages: [
+          { role: "system", content: "Ты — доброжелательный учитель. Пиши по-русски, кратко и конкретно. Не выдумывай факты, опирайся только на переданные данные." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 600
+      });
+      llmExplanation = response.choices[0]?.message?.content?.trim() || null;
+    } catch (e) {
+      console.warn("LLM generation failed:", e);
+      // Молча падаем на шаблонный разбор
+    }
+  }
   console.group("🔬 Отчёт о режиме анализа");
   console.log("modelReady:", modelReady);
   console.log("embedder:", typeof embedder);
@@ -3127,6 +3275,7 @@ if (!useEmbFinal) {
     usedEmbeddings: useEmbFinal,
     embCount,
     embTotal: corpusSents.length
+    llmExplanation 
   };
 }
 function buildSrcHtml(secData, sents, ovList, studentDates, importantTerms, stuLemmas) {
@@ -3261,9 +3410,15 @@ function renderResults(r,ov){
   $("resMeta").innerHTML=`Тема: <b>${r.title}</b>${state.subjectName?` · ${state.subjectName}`:""} · ${r.words} слов · ${r.sentences} предл. · время ответа ${fmtT(r.seconds)}<br>Оценка: <b>${grade.toFixed(1).replace(".",",")}</b> из 5`;
   const mb = $("modeBadge");
   if (mb) {
-    if (r.usedEmbeddings) {
+    if (r.usedEmbeddings && r.llmExplanation) {
+      mb.className = "mode-badge emb";
+      mb.innerHTML = `<span class="dot"></span>🧠 rubert-base-cased + LLM · полный разбор`;
+    } else if (r.usedEmbeddings) {
       mb.className = "mode-badge emb";
       mb.innerHTML = `<span class="dot"></span>🧠 rubert-base-cased · семантические эмбеддинги`;
+    } else if (r.llmExplanation) {
+      mb.className = "mode-badge lsa";
+      mb.innerHTML = `<span class="dot"></span>⚡ LSA + LLM · разбор с объяснением`;
     } else {
       mb.className = "mode-badge lsa";
       mb.innerHTML = `<span class="dot"></span>⚡ LSA-режим · модель не загружена`;
@@ -3280,7 +3435,12 @@ function renderResults(r,ov){
   const svg=$("netSvg");svg.classList.add("thinking");
   const fArr=ov.f||r.f;
   $("bars").innerHTML=fArr.map((v,i)=>`<div class="bar-row"><span class="lbl">${NAMES[i]}</span><span class="track"><i data-v="${Math.round(v*100)}" class="${v<.4?"bad":v<.65?"warn":""}"></i></span><span class="val">${Math.round(v*100)}%</span></div>`).join("");
-  $("summ").innerHTML=ov.summ||r.summ;
+  let summHtml = ov.summ || r.summ;
+  if (r.llmExplanation) {
+    const safe = esc(r.llmExplanation).replace(/\n/g, "</p><p>");
+    summHtml = `<p><b>✨ Продвинутый разбор:</b></p><p>${safe}</p>` + summHtml;
+  }
+  $("summ").innerHTML = summHtml;
   $("stuLegend").innerHTML=`<span><i class="dot" style="background:rgba(44,138,82,.35)"></i>смысл совпадает</span>
   <span><i class="dot" style="background:rgba(207,53,39,.35)"></i>ушло от темы</span>
   <span><i class="dot" style="background:rgba(138,90,209,.5)"></i>дословно</span>
@@ -3370,6 +3530,31 @@ renderLibrary();renderSources();renderAuthUI();updateOkLine();updateReady();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js');
   }
+</script>
+<script type="module">
+  (async () => {
+    const CDN_URLS = [
+      'https://esm.run/@mlc-ai/web-llm',
+      'https://esm.sh/@mlc-ai/web-llm',
+      'https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.79/+esm'
+    ];
+    let lastErr = null;
+    for (const url of CDN_URLS) {
+      try {
+        const mod = await import(url);
+        if (mod && mod.CreateMLCEngine) {
+          window.webllm = mod;
+          window.dispatchEvent(new Event('webllmLoaded'));
+          return;
+        }
+      } catch (e) {
+        lastErr = e;
+        console.warn('Не удалось загрузить WebLLM с', url, e);
+      }
+    }
+    window.webllmLoadError = lastErr;
+    window.dispatchEvent(new CustomEvent('webllmFailed', { detail: lastErr }));
+  })();
 </script>
 <script type="module">
   /* Надёжная загрузка Transformers.js: три CDN + событие об ошибке */
