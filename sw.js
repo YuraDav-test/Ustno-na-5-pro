@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pereskaz5-v27';
+const CACHE_NAME = 'pereskaz5-v28';
 const ASSETS = [
   './',
   './manifest.json',
@@ -27,7 +27,10 @@ self.addEventListener('fetch', e => {
   if (e.request.url.includes('huggingface.co') ||
       e.request.url.includes('cdn.jsdelivr.net') ||
       e.request.url.includes('unpkg.com') ||
-      e.request.url.includes('esm.sh')) {
+      e.request.url.includes('esm.sh') ||
+      e.request.url.includes('esm.run') ||
+      e.request.url.includes('mlc-ai') ||
+      e.request.url.includes('mlc.ai')) {
     return;
   }
   e.respondWith(
