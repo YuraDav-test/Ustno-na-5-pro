@@ -954,25 +954,31 @@ function isRomanNumeral(s){
 function extractRomanCenturies(text){
   if(!text) return [];
   const result=[];
-  // Ловим как одиночные (XIV), так и диапазоны (XIV–XV, XIV-XV, XIV — XV)
-  const re=/\b([IVXLCDM]{1,7})(?:\s*[–\-—]\s*([IVXLCDM]{1,7}))?\b/g;
+  // Ловим одиночные (XIV), диапазоны (XIV–XV), слитные с «в.» (XIVв., XIVвек)
+  const re = /\b([IVXLCDM]{1,7})(?:\s*[–\-—]\s*([IVXLCDM]{1,7}))?\b/g;
   let m;
-  while((m=re.exec(text))){
+  while((m = re.exec(text))){
     const candidates = [m[1], m[2]].filter(Boolean);
     const pos = m.index;
     const after = text.slice(pos + m[0].length, pos + m[0].length + 30).toLowerCase();
     const before = text.slice(Math.max(0, pos - 25), pos).toLowerCase();
 
-    // Контекст «век» может стоять ПОСЛЕ (XIV в., XIV век, XIV–XV вв.)
-    // или ДО (в XIV веке, с XIV века, к XIV веку)
-    const ctxAfter = /^\s*[.)\]]?\s*(век|веке|века|веков|вв?\.?|столети)/.test(after);
+    // «век» сразу после (с возможным пробелом, точкой, скобкой):
+    // «XIV в.», «XIVв.», «XIV век», «XIV–XV вв.», «XIV.» (в конце предложения)
+    const ctxAfter = /^[.)\]]?\s*(век|веке|века|веков|вв?\.?|столети)/.test(after);
+
+    // «XIVв.» без пробела — after начинается с «в.»
+    const gluedAfter = /^[вВ]\.?/.test(after);
+
+    // «век» до: «в XIV веке», «с XIV века», «к XIV веку»
     const ctxBefore = /(^|[^а-яёa-z])(в|с|до|от|к|на|по)\s+(?:[а-яё]+\s+){0,3}$/.test(before);
 
-    // Или просто «в скобках» — типичный формат учебника: (XIV в.)
-    const inParens = /\([^)]*$/.test(text.slice(Math.max(0, pos - 3), pos)) &&
-                     /^[^)]*\)/.test(text.slice(pos + m[0].length, pos + m[0].length + 15));
+    // «XIV» в скобках — (XIV), ( XIV ), (XIV в.)
+    const beforeSnippet = text.slice(Math.max(0, pos - 5), pos);
+    const afterSnippet = text.slice(pos + m[0].length, pos + m[0].length + 20);
+    const inParens = /\([^)]*$/.test(beforeSnippet) && /^[^)]*\)/.test(afterSnippet);
 
-    if (ctxAfter || ctxBefore || inParens) {
+    if (ctxAfter || gluedAfter || ctxBefore || inParens) {
       candidates.forEach(c => {
         if (isRomanNumeral(c)) result.push(c.toUpperCase());
       });
@@ -992,6 +998,32 @@ const STOP_HEAD=/^(вопросы?|задания?|подумай(те)?|про�
 const CAPTION_RE=/^(рис\.?|рисунок|ил\.?|иллюстраци\w*|фото\w*|картина|карта|схема|табл\.?|таблица|портрет|гравюра|икона)\b/i;
 const PAGE_END=/^\s*—?\s*\d{1,4}\s*—?\s*$/;
 const VOWELS="аеёиоуыэюя";
+function normalizeRomanOcrToken(tok) {
+  if (!tok) return tok;
+  // Оставляем только символы, похожие на римские цифры
+  let s = tok
+    .replace(/[1lI]/g, "I")      // 1, l, I → I
+    .replace(/[VYУ]/g, "V")      // V, Y, У → V
+    .replace(/[XХx]/g, "X")      // X, Х(кир), x → X
+    .replace(/[CС]/g, "C")       // C, С(кир) → C
+    .replace(/[DД]/g, "D")
+    .replace(/[MМ]/g, "M");
+  return s;
+}
+
+/* Пытается «починить» токен, если он похож на римскую цифру.
+   Возвращает исправленный токен или null, если это не римская цифра. */
+function fixRomanToken(tok) {
+  if (!tok) return null;
+  const letters = tok.replace(/[^IVXLCDMivxlcdm1lYУХхXxСCс]/g, "");
+  if (letters.length < 1 || letters.length > 7) return null;
+  // Доля «римских» символов должна быть высокой
+  if (letters.length / tok.length < 0.75) return null;
+  const fixed = normalizeRomanOcrToken(letters).toUpperCase();
+  if (!/^[IVXLCDM]+$/.test(fixed)) return null;
+  if (!isRomanNumeral(fixed)) return null;
+  return fixed;
+}
 function isStopHead(ln){if(/[.;]$/.test(ln))return false;const words=ln.split(" ").filter(Boolean);if(words.length>4)return false;return STOP_HEAD.test(ln.trim());}
 function isCaption(ln){if(CAPTION_RE.test(ln))return true;if(/^«[^»]{2,60}»\.?$/.test(ln))return true;return false;}
 function cleanOcrText(data){
@@ -1015,7 +1047,12 @@ function cleanOcrText(data){
           const letters=t.toLowerCase().replace(/[^а-яёa-z]/g,"");
           if(letters.length>=2){let v=0;for(const ch of letters)if(VOWELS.indexOf(ch)>=0)v++;if(v/letters.length<.15)return false;}
           return true;
-        }).map(w=>w.text.trim());
+        }).map(w => {
+          const original = w.text.trim();
+          // Пытаемся починить римскую цифру; если получилось — берём исправленный вариант
+          const fixedRoman = fixRomanToken(original);
+          return fixedRoman ? fixedRoman : original;
+        });
         const line=words.join(" ").replace(/\s+/g," ").trim();
         const lettersAll=line.replace(/[^а-яёa-zА-ЯЁA-Z]/g,"");
         const hasRoman = /\b[IVXLCDM]{1,7}\b/.test(line);
@@ -2050,6 +2087,10 @@ async function ocrFiles(files){
       else{
         entry.text=t;
         const doc=readDocument(t);
+        // Склеиваем разорванные века: «XIV» + «в.» → «XIV в.»
+        doc.sections.forEach(sg => {
+          sg.text = sg.text.replace(/\b([IVXLCDM]{1,7})\s+([вВ]\.?)\b/g, "$1 $2");
+        });
         entry.sections=doc.sections;
         const heads=entry.sections.filter(x=>x.heading).length;
         invalidateDict();
