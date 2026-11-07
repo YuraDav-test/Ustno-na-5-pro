@@ -133,6 +133,17 @@ textarea{resize:vertical;min-height:76px}
 @keyframes stampIn{0%{transform:scale(2.6) rotate(-16deg);opacity:0}70%{transform:scale(.92) rotate(3deg);opacity:1}100%{transform:scale(1) rotate(-4deg)}}
 .verdict{font-family:Caveat;font-size:clamp(28px,3.4vw,40px);line-height:1.05;color:var(--ink)}
 .res-meta{font-size:13px;color:var(--ink-soft);margin-top:8px;line-height:1.6}
+.mode-badge{
+  display:inline-flex;align-items:center;gap:6px;
+  margin-top:8px;padding:5px 12px;border-radius:999px;
+  font-size:12px;font-weight:700;letter-spacing:.02em;
+}
+.mode-badge.emb{background:var(--green-soft);color:var(--green);border:1px solid #cfe6d5;}
+.mode-badge.lsa{background:#fdf3dc;color:#a06a10;border:1px solid #e6d793;}
+.mode-badge .dot{width:8px;height:8px;border-radius:50%;}
+.mode-badge.emb .dot{background:var(--green);animation:pulse 1.6s infinite;}
+.mode-badge.lsa .dot{background:#d99a2b;}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(44,138,82,.5)}50%{box-shadow:0 0 0 6px rgba(44,138,82,0)}}
 .teacher-fix{margin-top:10px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-soft);flex-wrap:wrap}
 .tgrade{width:34px;height:34px;border-radius:50%;border:2px solid #d8d5c6;background:#fff;font:inherit;font-weight:700;cursor:pointer;transition:.15s}
 .tgrade:hover{border-color:var(--red)}
@@ -378,6 +389,7 @@ footer b{color:var(--ink)}
         <div>
           <div class="verdict" id="verdict"></div>
           <div class="res-meta" id="resMeta"></div>
+          <div class="mode-badge" id="modeBadge"></div>
           <div class="teacher-fix">
             <span>Оценка учителя (обучает нейросеть):</span>
             <button class="tgrade" data-g="2">2</button>
@@ -2392,25 +2404,33 @@ async function analyze(){
   corpusSents.forEach(cs => cs.content.forEach(t => corpusVocab.add(t)));
 
   /* ============ 3. Эмбеддинги или LSA ============ */
-  const useEmb = !!(modelReady && embedder && typeof embedder === 'function');
+  const useEmb = !!(modelReady && embedder && typeof embedder === "function");
   let lsa = { ready: false };
+  let embCount = 0;           // ← реально посчитанные эмбеддинги
+  let embFailed = false;
+
   if (useEmb) {
-    console.log("🧠 Используем семантические эмбеддинги (rubert-base-cased) для анализа.");
-    if (typeof window.updateAnalysisProgress === "function") {
-      window.updateAnalysisProgress("Считаю семантические эмбеддинги учебника…");
-    }
+    window.updateAnalysisProgress?.("Считаю семантические эмбеддинги учебника…");
     for (let i = 0; i < corpusSents.length; i++) {
-      const cs = corpusSents[i];
-      cs.emb = await getEmbedding(cs.raw);
-      if (typeof window.updateAnalysisProgress === "function" && i % 5 === 0) {
-        window.updateAnalysisProgress(`Эмбеддинги учебника: ${i + 1} из ${corpusSents.length}…`);
+      try {
+        corpusSents[i].emb = await getEmbedding(corpusSents[i].raw);
+        embCount++;
+      } catch (e) {
+        console.error("Эмбеддинг не получен:", e);
+        embFailed = true;
+        break;
       }
+      if (i % 5 === 0) window.updateAnalysisProgress?.(`Эмбеддинги учебника: ${i+1} из ${corpusSents.length}…`);
     }
-  } else {
-    console.warn("⚠️ Модель не загружена. Используется быстрый LSA-режим. Точность анализа ниже.");
-    lsa = buildLSA(corpusSents);
-    if (lsa.ready) corpusSents.forEach((s, j) => s.z = lsa.sentZ[j]);
   }
+
+// Если хоть один эмбеддинг не получился — откатываемся на LSA
+const useEmbFinal = useEmb && !embFailed && embCount > 0;
+
+if (!useEmbFinal) {
+  lsa = buildLSA(corpusSents);
+  if (lsa.ready) corpusSents.forEach((s, j) => s.z = lsa.sentZ[j]);
+}
 
   /* ============ 4. Секции ============ */
   const INTRO_MARK = /узнаем|познакоми|рассмотрим|вспомним|в этом параграфе|в этой теме|в данном параграфе|изучим|вы узна|ранее (мы|вы)|начнём|начнем/;
@@ -2446,7 +2466,7 @@ async function analyze(){
     const v = new Map();
     for (let j = sec.from; j < sec.to; j++) addVec(v, corpusSents[j].vec);
     sec.vec = v;
-    if (useEmb && corpusSents[sec.from] && corpusSents[sec.from].emb) {
+    if (useEmbFinal && corpusSents[sec.from] && corpusSents[sec.from].emb) {
       const dim = corpusSents[sec.from].emb.length;
       const avg = new Array(dim).fill(0);
       let cnt = 0;
@@ -2464,7 +2484,7 @@ async function analyze(){
   /* ============ 5. Сходство ============ */
   function simObj(obj, cs){
     // Если у обоих объектов есть эмбеддинги — используем их (это самый точный путь)
-    if (useEmb && obj.emb && cs.emb) {
+    if (useEmbFinal && obj.emb && cs.emb) {
       return cosineSimilarity(obj.emb, cs.emb);
     }
     // Иначе — откат к LSA/TF-IDF
@@ -2491,11 +2511,16 @@ async function analyze(){
     const c = { raw, toks, terms, content, wc: toks.length };
     c.vec = mkVec(terms);
 
-    if (useEmb) {
+    if (useEmbFinal) {
       if (typeof window.updateAnalysisProgress === "function") {
         window.updateAnalysisProgress(`Эмбеддинги пересказа: ${ci + 1} из ${sentTexts.length}…`);
       }
-      c.emb = await getEmbedding(raw);
+      try {
+        c.emb = await getEmbedding(raw);
+      } catch (e) {
+        console.warn("Не удалось посчитать эмбеддинг для:", raw, e);
+        c.emb = null;
+      }
     } else if (lsa.ready) {
       c.z = lsa.embedMap(c.vec);
     }
@@ -2534,7 +2559,7 @@ async function analyze(){
     addVec(m, chunks[i].vec);
     addVec(m, chunks[i + 1].vec);
     let pairEmb = null;
-    if (useEmb && chunks[i].emb && chunks[i + 1].emb) {
+    if (useEmbFinal && chunks[i].emb && chunks[i + 1].emb) {
       const dim = chunks[i].emb.length;
       pairEmb = new Array(dim).fill(0);
       for (let k = 0; k < dim; k++) {
@@ -2622,7 +2647,7 @@ async function analyze(){
     const v = new Map();
     for (let i = b.from; i < b.to; i++) addVec(v, chunks[i].vec);
     let blockEmb = null;
-    if (useEmb && chunks[b.from] && chunks[b.from].emb) {
+    if (useEmbFinal && chunks[b.from] && chunks[b.from].emb) {
       const dim = chunks[b.from].emb.length;
       blockEmb = new Array(dim).fill(0);
       let cnt = 0;
@@ -2936,7 +2961,7 @@ async function analyze(){
 
   const plan = blockMap.filter(b => b.sec >= 0).map(b => (b.sec + 1)).join(" → ");
   const sumParts = [];
-  const modeLabel = useEmb
+  const modeLabel = useEmbFinal
     ? " · семантические эмбеддинги (rubert-base-cased)"
     : " · быстрый LSA-режим";
   sumParts.push(
@@ -3005,12 +3030,24 @@ async function analyze(){
     weight: s.weight, termCount: s.termCount
   }));
 
+  console.group("🔬 Отчёт о режиме анализа");
+  console.log("modelReady:", modelReady);
+  console.log("embedder:", typeof embedder);
+  console.log("useEmbFinal:", useEmbFinal);
+  console.log("embCount / embTotal:", embCount, "/", corpusSents.length);
+  console.log("Размерность вектора:", corpusSents[0]?.emb?.length ?? "—");
+  console.log("Кэш эмбеддингов:", embeddingsCache.size, "записей");
+  console.groupEnd();
+  /* === КОНЕЦ НОВОГО === */
+
   return {
     title, words, sentences, seconds, f, grade, mark, conf, coverage,
     stuHtml, srcHtml, summ, good, bad, secData,
     corpusSents, bookText, studentText: text, plan, quiz, contradictions,
     wordCov, bigramCov, trigramCov,
-    usedEmbeddings: useEmb
+    usedEmbeddings: useEmbFinal,
+    embCount,
+    embTotal: corpusSents.length
   };
 }
 function buildSrcHtml(secData,sents,ovList,studentDates,importantTerms,stuLemmas){
@@ -3076,6 +3113,16 @@ function renderResults(r,ov){
   const st=$("stamp");st.classList.remove("in");void st.offsetWidth;st.classList.add("in");
   $("verdict").textContent=ov.verdict||VERDICT[mark];
   $("resMeta").innerHTML=`Тема: <b>${r.title}</b>${state.subjectName?` · ${state.subjectName}`:""} · ${r.words} слов · ${r.sentences} предл. · время ответа ${fmtT(r.seconds)}<br>Оценка: <b>${grade.toFixed(1).replace(".",",")}</b> из 5`;
+  const mb = $("modeBadge");
+  if (mb) {
+    if (r.usedEmbeddings) {
+      mb.className = "mode-badge emb";
+      mb.innerHTML = `<span class="dot"></span>🧠 rubert-base-cased · семантические эмбеддинги`;
+    } else {
+      mb.className = "mode-badge lsa";
+      mb.innerHTML = `<span class="dot"></span>⚡ LSA-режим · модель не загружена`;
+    }
+  }
   LAST_F=ov.f||r.f;
   saveResult(r,grade);
   renderProgressCard();renderAchCard();
