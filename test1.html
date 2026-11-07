@@ -733,7 +733,7 @@ async function loadLlmModel() {
 
     const { CreateMLCEngine } = window.webllm;
 
-    llmEngine = await CreateMLCEngine("Qwen2.5-0.5B-Instruct-q4f16_1-MLC", {
+    llmEngine = await CreateMLCEngine("Qwen2.5-0.5B-Instruct-q4f32_1-MLC", {
       initProgressCallback: (p) => {
         try {
           const pct = Math.round((p.progress || 0) * 100);
