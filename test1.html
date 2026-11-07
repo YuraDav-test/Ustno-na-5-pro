@@ -182,6 +182,9 @@ textarea{resize:vertical;min-height:76px}
 .m-filler{background:var(--hl);border-radius:3px;padding:0 3px}
 .m-fact{background:var(--red-soft);border-bottom:2px solid var(--red);padding:0 2px}
 .marked .w-term{background:rgba(44,138,82,.22);border-radius:3px;padding:0 2px;font-weight:600}
+.marked .w-said{background:rgba(44,138,82,.20);border-radius:3px;padding:0 2px}
+.marked .w-not-said{color:var(--ink-soft);opacity:.55}
+.marked .s-skip{color:#a9a9a9;font-size:12px;opacity:.6}
 .marked .w-off{background:rgba(207,53,39,.13);border-radius:3px;padding:0 2px;border-bottom:1px dashed rgba(207,53,39,.5)}
 .marked .w-num-y{background:rgba(44,138,82,.20);border-radius:3px;padding:0 2px;font-weight:600}
 .imp{padding:0 1px;border-radius:3px}
@@ -415,11 +418,13 @@ footer b{color:var(--ink)}
       <div class="card">
         <h3>Учебник: смысловые части и что из них попало в ответ</h3>
         <div class="legend">
-          <span><i class="dot" style="background:rgba(44,138,82,.5)"></i>передано по смыслу</span>
+          <span><i class="dot" style="background:rgba(44,138,82,.5)"></i>предложение передано по смыслу</span>
           <span><i class="dot" style="background:rgba(217,154,43,.6)"></i>частично</span>
           <span><i class="dot" style="background:rgba(207,53,39,.4)"></i>упущено</span>
-          <span><i class="dot" style="background:rgba(44,138,82,.3);border-bottom:2px solid var(--green)"></i>дата/термин/личность упомянуты</span>
-          <span><i class="dot" style="background:rgba(207,53,39,.2);border-bottom:2px dotted var(--red)"></i>дата/термин/личность не упомянуты</span>
+          <span><i class="dot" style="background:rgba(44,138,82,.35)"></i>слово реально сказано учеником</span>
+          <span><i class="dot" style="background:#fff;border:1px solid #ccc"></i>слово не сказано (серое)</span>
+          <span><i class="dot" style="background:rgba(44,138,82,.3);border-bottom:2px solid var(--green)"></i>термин/дата упомянуты в этом контексте</span>
+          <span><i class="dot" style="background:rgba(207,53,39,.2);border-bottom:2px dotted var(--red)"></i>термин/дата не упомянуты</span>
         </div>
         <div class="src-scroll marked" id="srcMark"></div>
       </div>
@@ -949,19 +954,31 @@ function isRomanNumeral(s){
 function extractRomanCenturies(text){
   if(!text) return [];
   const result=[];
-  const re=/\b([IVXLCDM]{1,7})\b/g;
+  // Ловим как одиночные (XIV), так и диапазоны (XIV–XV, XIV-XV, XIV — XV)
+  const re=/\b([IVXLCDM]{1,7})(?:\s*[–\-—]\s*([IVXLCDM]{1,7}))?\b/g;
   let m;
   while((m=re.exec(text))){
-    const r=m[1];
-    if(!isRomanNumeral(r)) continue;
-    const pos=m.index, len=r.length;
-    const before=text.slice(Math.max(0,pos-20),pos).toLowerCase();
-    const after=text.slice(pos+len,pos+len+22).toLowerCase();
-    const ctxBefore=/(^|[^а-яёa-z])(в|с|до|от|к)\s+$/.test(before);
-    const ctxAfter=/^\s*(век|веке|века|веков|вв?\.|столети)/.test(after);
-    if(ctxBefore||ctxAfter) result.push(r.toUpperCase());
+    const candidates = [m[1], m[2]].filter(Boolean);
+    const pos = m.index;
+    const after = text.slice(pos + m[0].length, pos + m[0].length + 30).toLowerCase();
+    const before = text.slice(Math.max(0, pos - 25), pos).toLowerCase();
+
+    // Контекст «век» может стоять ПОСЛЕ (XIV в., XIV век, XIV–XV вв.)
+    // или ДО (в XIV веке, с XIV века, к XIV веку)
+    const ctxAfter = /^\s*[.)\]]?\s*(век|веке|века|веков|вв?\.?|столети)/.test(after);
+    const ctxBefore = /(^|[^а-яёa-z])(в|с|до|от|к|на|по)\s+(?:[а-яё]+\s+){0,3}$/.test(before);
+
+    // Или просто «в скобках» — типичный формат учебника: (XIV в.)
+    const inParens = /\([^)]*$/.test(text.slice(Math.max(0, pos - 3), pos)) &&
+                     /^[^)]*\)/.test(text.slice(pos + m[0].length, pos + m[0].length + 15));
+
+    if (ctxAfter || ctxBefore || inParens) {
+      candidates.forEach(c => {
+        if (isRomanNumeral(c)) result.push(c.toUpperCase());
+      });
+    }
   }
-  return result;
+  return [...new Set(result)];
 }
 function extractStudentNums(text){
   const s=new Set();
@@ -986,13 +1003,23 @@ function cleanOcrText(data){
           const t=(w.text||"").trim();
           if(!t)return false;
           if(w.confidence!=null&&w.confidence<50)return false;
+
+          // Римские века (XIV, XVII, XIX, XXI…) не содержат гласных —
+          // пропускаем их без фильтра по гласным.
+          const cleanRoman = t.replace(/[^IVXLCDMivxlcdm]/g, "");
+          if (cleanRoman.length >= 1 && cleanRoman.length === t.replace(/\s/g, "").length
+              && /^[IVXLCDMivxlcdm]+$/.test(t.replace(/\s/g, ""))) {
+            return true;
+          }
+
           const letters=t.toLowerCase().replace(/[^а-яёa-z]/g,"");
           if(letters.length>=2){let v=0;for(const ch of letters)if(VOWELS.indexOf(ch)>=0)v++;if(v/letters.length<.15)return false;}
           return true;
         }).map(w=>w.text.trim());
         const line=words.join(" ").replace(/\s+/g," ").trim();
         const lettersAll=line.replace(/[^а-яёa-zА-ЯЁA-Z]/g,"");
-        if(line&&lettersAll.length>=Math.max(2,line.length*.35))out.push(line);
+        const hasRoman = /\b[IVXLCDM]{1,7}\b/.test(line);
+        if(line&&(lettersAll.length>=Math.max(2,line.length*.35) || hasRoman))out.push(line);
       });});});
       if(out.length)return out.join("\n");
     }
@@ -1261,28 +1288,32 @@ function extractImportant(corpusSents, df, termRank, names){
 
   return {termSet,dates};
 }
-function markImportant(raw,studentDates,importantTerms,stuLemmas){
-  let out="";let last=0;
-  const re=/(\b[IVXLCDM]{1,7}\b)|(\d{3,4})|([а-яёА-ЯЁa-z0-9][а-яёА-ЯЁa-z0-9\-]*)/g;
+function markImportant(raw, studentDates, importantTerms, stuLemmas, localLemmas, localDates) {
+  let out = ""; let last = 0;
+  const re = /(\b[IVXLCDM]{1,7}\b)|(\d{3,4})|([а-яёА-ЯЁa-z0-9][а-яёА-ЯЁa-z0-9\-]*)/g;
   let m;
-  while((m=re.exec(raw))){
-    out+=esc(raw.slice(last,m.index));
-    const tok=m[0];
-    const isRoman=m[1]&&isRomanNumeral(m[1]);
-    if(/^\d{3,4}$/.test(tok) || isRoman){
-      const key=isRoman?tok.toUpperCase():tok;
-      const mentioned=studentDates&&(studentDates.has(key)||studentDates.has(tok));
-      out+=`<span class="imp d ${mentioned?"y":"n"}">${esc(tok)}</span>`;
-    }else{
-      const lem=lemma(tok).l;
-      if(importantTerms&&importantTerms.has(lem)){
-        const mentioned=stuLemmas&&stuLemmas.has(lem);
-        out+=`<span class="imp t ${mentioned?"y":"n"}">${esc(tok)}</span>`;
-      }else out+=esc(tok);
+  // Для терминов и дат используем ЛОКАЛЬНЫЙ контекст, а не весь пересказ
+  const termPool = localLemmas || stuLemmas;
+  const datePool = localDates || studentDates;
+
+  while ((m = re.exec(raw))) {
+    out += esc(raw.slice(last, m.index));
+    const tok = m[0];
+    const isRoman = m[1] && isRomanNumeral(m[1]);
+    if (/^\d{3,4}$/.test(tok) || isRoman) {
+      const key = isRoman ? tok.toUpperCase() : tok;
+      const mentioned = datePool && (datePool.has(key) || datePool.has(tok));
+      out += `<span class="imp d ${mentioned ? "y" : "n"}">${esc(tok)}</span>`;
+    } else {
+      const lem = lemma(tok).l;
+      if (importantTerms && importantTerms.has(lem)) {
+        const mentioned = termPool && termPool.has(lem);
+        out += `<span class="imp t ${mentioned ? "y" : "n"}">${esc(tok)}</span>`;
+      } else out += esc(tok);
     }
-    last=m.index+tok.length;
+    last = m.index + tok.length;
   }
-  out+=esc(raw.slice(last));
+  out += esc(raw.slice(last));
   return out;
 }
 
@@ -2690,10 +2721,17 @@ if (!useEmbFinal) {
     let wsum = 0, wcov = 0, matched = 0;
     for (let j = sec.from; j < sec.to; j++) {
       const cs = corpusSents[j];
-      let best = 0;
-      for (const c of chunks) { const s = simObj(c, cs); if (s > best) best = s; }
-      for (const p of pairData) { const s = simObj(p, cs); if (s > best) best = s; }
+      let best = 0, bestChunk = null;
+      for (const c of chunks) {
+        const s = simObj(c, cs);
+        if (s > best) { best = s; bestChunk = c; }
+      }
+      for (const p of pairData) {
+        const s = simObj(p, cs);
+        if (s > best) { best = s; bestChunk = null; }
+      }
       cs.best = best;
+      cs.bestChunk = bestChunk;   // ← НОВОЕ: конкретное предложение ученика
       if (best >= .4) matched++;
       wsum += cs.wc;
       wcov += cs.wc * clamp(best / .45, 0, 1);
@@ -3050,26 +3088,93 @@ if (!useEmbFinal) {
     embTotal: corpusSents.length
   };
 }
-function buildSrcHtml(secData,sents,ovList,studentDates,importantTerms,stuLemmas){
-  const stMap={};
-  if(Array.isArray(ovList))ovList.forEach(o=>{if(o&&o.title&&["full","part","none"].indexOf(o.status)>=0)stMap[norm(String(o.title))]=o.status;});
-  return secData.map((sec,i)=>{
-    let inner="",shown=0;
-    for(let j=sec.from;j<sec.to;j++){
-      if(shown>=60){inner+="<span> …</span>";break;}
+function buildSrcHtml(secData, sents, ovList, studentDates, importantTerms, stuLemmas) {
+  const stMap = {};
+  if (Array.isArray(ovList)) ovList.forEach(o => {
+    if (o && o.title && ["full", "part", "none"].indexOf(o.status) >= 0)
+      stMap[norm(String(o.title))] = o.status;
+  });
+
+  return secData.map((sec, i) => {
+    let inner = "", shown = 0;
+    for (let j = sec.from; j < sec.to; j++) {
+      if (shown >= 60) { inner += "<span> …</span>"; break; }
       shown++;
-      const cs=sents[j];
-      const cls=cs.best>=.4?"s-cov":cs.best>=.18?"s-part":"s-miss";
-      inner+=`<span class="${cls}">${markImportant(cs.raw,studentDates,importantTerms,stuLemmas)}</span>`;
+      const cs = sents[j];
+
+      // Слишком короткие предложения (колонтитулы, подписи) — просто серым, без оценки
+      if (cs.wc < 4) {
+        inner += `<span class="s-skip">${markImportant(cs.raw, studentDates, importantTerms, stuLemmas, null, null)}</span> `;
+        continue;
+      }
+
+      // Уровень сходства всего предложения
+      const sentCls = cs.best >= .4 ? "s-cov" : cs.best >= .18 ? "s-part" : "s-miss";
+
+      // ЛОКАЛЬНЫЙ контекст: только из того предложения ученика,
+      // которое дало максимум сходства с ЭТИМ предложением учебника
+      let localLemmas = null, localDates = null;
+      if (cs.bestChunk && cs.best >= .18) {
+        localLemmas = new Set(cs.bestChunk.terms || []);
+        localDates = extractStudentNums(cs.bestChunk.raw || "");
+      }
+
+      // Раскрашиваем пословно: слово зелёное, только если оно есть
+      // И в localLemmas (совпало с конкретным предложением ученика)
+      const marked = markImportantPerWord(
+        cs.raw, studentDates, importantTerms, stuLemmas, localLemmas, localDates
+      );
+      inner += `<span class="${sentCls}">${marked}</span> `;
     }
-    const st=stMap[norm(sec.title)]||stMap[norm(sec.heading||"")]||sec.status;
-    const tag=st==="full"?'<em class="cov-tag full">рассказана</em>':st==="part"?'<em class="cov-tag part">частично</em>':'<em class="cov-tag none">не рассказана</em>';
-    const stat=`<span class="sec-stat">в ответе: ${sec.spoken} предл. · найдено ${sec.matchedS}/${sec.totalS} · вес ${Math.round((sec.weight||0)*100)}%</span>`;
-    const head=sec.heading
-      ?`<span class="sec-head">${esc(sec.heading)} ${tag}</span>${stat}`
-      :`<span class="src-ttl">Часть ${i+1} · ${esc(sec.title)} ${tag}${stat}</span>`;
+
+    const st = stMap[norm(sec.title)] || stMap[norm(sec.heading || "")] || sec.status;
+    const tag = st === "full" ? '<em class="cov-tag full">рассказана</em>'
+              : st === "part" ? '<em class="cov-tag part">частично</em>'
+              : '<em class="cov-tag none">не рассказана</em>';
+    const stat = `<span class="sec-stat">в ответе: ${sec.spoken} предл. · найдено ${sec.matchedS}/${sec.totalS} · вес ${Math.round((sec.weight || 0) * 100)}%</span>`;
+    const head = sec.heading
+      ? `<span class="sec-head">${esc(sec.heading)} ${tag}</span>${stat}`
+      : `<span class="src-ttl">Часть ${i + 1} · ${esc(sec.title)} ${tag}${stat}</span>`;
     return `<p>${head}${inner}</p>`;
   }).join("");
+}
+function markImportantPerWord(raw, studentDates, importantTerms, stuLemmas, localLemmas, localDates) {
+  let out = ""; let last = 0;
+  const re = /(\b[IVXLCDM]{1,7}\b)|(\d{3,4})|([а-яёА-ЯЁa-z0-9][а-яёА-ЯЁa-z0-9\-]*)/g;
+  let m;
+  const termPool = localLemmas || stuLemmas;
+  const datePool = localDates || studentDates;
+
+  while ((m = re.exec(raw))) {
+    out += esc(raw.slice(last, m.index));
+    const tok = m[0];
+    const isRoman = m[1] && isRomanNumeral(m[1]);
+
+    if (/^\d{3,4}$/.test(tok) || isRoman) {
+      const key = isRoman ? tok.toUpperCase() : tok;
+      const mentioned = datePool && (datePool.has(key) || datePool.has(tok));
+      out += `<span class="imp d ${mentioned ? "y" : "n"}">${esc(tok)}</span>`;
+    } else {
+      const lem = lemma(tok).l;
+      if (importantTerms && importantTerms.has(lem)) {
+        const mentioned = termPool && termPool.has(lem);
+        out += `<span class="imp t ${mentioned ? "y" : "n"}">${esc(tok)}</span>`;
+      } else {
+        // Обычное слово: зелёным — только если реально есть в localLemmas
+        const mentioned = localLemmas && localLemmas.has(lem);
+        if (mentioned) {
+          out += `<span class="w-said">${esc(tok)}</span>`;
+        } else if (localLemmas) {
+          out += `<span class="w-not-said">${esc(tok)}</span>`;
+        } else {
+          out += esc(tok);
+        }
+      }
+    }
+    last = m.index + tok.length;
+  }
+  out += esc(raw.slice(last));
+  return out;
 }
 
 function buildNet(){
