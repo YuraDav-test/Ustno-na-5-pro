@@ -720,7 +720,17 @@ async function loadLlmModel() {
     status.textContent = "⚠ WebGPU не поддерживается этим браузером. Используется базовый разбор без LLM.";
     return;
   }
-
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) {
+    status.textContent = "⚠ WebGPU не поддерживается. LLM-режим недоступен.";
+    return;
+  }
+  const maxBuffer = adapter.limits.maxStorageBufferBindingSize;
+  if (maxBuffer < 2_000_000_000) {
+    status.textContent = "⚠ На этом устройстве недостаточно памяти GPU для продвинутой модели. Будет использован базовый разбор.";
+    document.getElementById('loadLlmBtn').disabled = true;
+    return;
+  }
   llmLoading = true;
   btn.disabled = true;
   progressBox.style.display = "block";
@@ -733,7 +743,7 @@ async function loadLlmModel() {
 
     const { CreateMLCEngine } = window.webllm;
 
-    llmEngine = await CreateMLCEngine("Qwen2.5-0.5B-Instruct-q4f32_1-MLC", {
+    llmEngine = await CreateMLCEngine("Qwen2.5-3B-Instruct-q4f32_1-MLC", {
       initProgressCallback: (p) => {
         try {
           const pct = Math.round((p.progress || 0) * 100);
@@ -2519,20 +2529,68 @@ window.updateAnalysisProgress = (msg) => {
   if (el) el.textContent = msg;
 };
 function buildLlmPrompt(d) {
-  const parts = [];
-  parts.push(`Тема: «${d.title}». Ученик рассказал ${d.words} слов.`);
-  parts.push(`Полнота: ${Math.round(d.coverage * 100)}%. Термины: ${Math.round(d.termCov * 100)}%.`);
-  if (d.secNone.length) parts.push(`Не рассказаны части: ${d.secNone.join(", ")}.`);
-  if (d.secPart.length) parts.push(`Частично раскрыты: ${d.secPart.join(", ")}.`);
-  if (d.contradictions.length) parts.push(`Противоречия: ${d.contradictions.join(" ")}`);
-  if (d.factIssues.length) parts.push(`Сомнительные даты: ${d.factIssues.join(", ")}.`);
-  if (d.plan) parts.push(`План ответа по частям: ${d.plan}.`);
-  parts.push(`Пересказ (начало): «${d.studentText}»`);
-  if (d.good.length || d.bad.length) {
-    parts.push(`Уже сформулированные наблюдения: ${d.good.concat(d.bad).slice(0, 3).join(" ")}`);
+  const lines = [];
+  lines.push(`Тема: «${d.title}». Ученик рассказал ${d.words} слов. Полнота: ${Math.round(d.coverage * 100)}%.`);
+  lines.push("");
+
+  if (d.missedSections.length) {
+    lines.push("УЧЕНИК НЕ РАССКАЗАЛ ЭТИ ЧАСТИ УЧЕБНИКА:");
+    d.missedSections.forEach(s => lines.push(`• Часть «${s.title}». В учебнике: «${s.snippet}»`));
+    lines.push("");
   }
-  parts.push("Напиши 3 конкретных совета ученику: что улучшить и как. Опирайся только на данные выше, не выдумывай факты. Кратко, по-русски.");
-  return parts.join("\n");
+
+  if (d.partialSections.length) {
+    lines.push("ЧАСТИЧНО РАСКРЫТЫЕ ЧАСТИ:");
+    d.partialSections.forEach(s => {
+      lines.push(`• Часть «${s.title}». В учебнике: «${s.snippet}»`);
+      if (s.spoken) lines.push(`  Ученик сказал про это: «${s.spoken}»`);
+    });
+    lines.push("");
+  }
+
+  if (d.dateContradictions.length) {
+    lines.push("ОШИБКИ В ДАТАХ:");
+    d.dateContradictions.forEach(c => {
+      lines.push(`• Ученик сказал «${c.said}». В учебнике: «${c.correct}».`);
+      if (c.evidence) lines.push(`  Контекст из учебника: «${c.evidence}»`);
+    });
+    lines.push("");
+  }
+
+  if (d.factIssues.length) {
+    lines.push("ДАТЫ, УПОМЯНУТЫЕ БЕЗ КОНТЕКСТА:");
+    d.factIssues.forEach(f => {
+      lines.push(`• Ученик назвал дату «${f.date}», но не сказал, к какому событию она относится.`);
+      if (f.evidence) lines.push(`  В учебнике она связана с: ${f.evidence}`);
+    });
+    lines.push("");
+  }
+
+  if (d.offTopic.length) {
+    lines.push("ПРЕДЛОЖЕНИЯ, УХОДЯЩИЕ ОТ ТЕМЫ:");
+    d.offTopic.forEach(o => lines.push(`• «${o.quote}» — это не связано с материалом параграфа.`));
+    lines.push("");
+  }
+
+  if (d.missingTerms.length) {
+    lines.push(`КЛЮЧЕВЫЕ ТЕРМИНЫ, КОТОРЫЕ УЧЕНИК НЕ УПОМЯНУЛ: ${d.missingTerms.join(", ")}.`);
+    lines.push("");
+  }
+
+  lines.push(`ПЕРЕСКАЗ УЧЕНИКА (полностью):`);
+  lines.push(`«${d.studentText}»`);
+  lines.push("");
+
+  lines.push("ЗАДАЧА:");
+  lines.push("Ты — учитель. Объясни КАЖДУЮ ошибку ученика конкретно:");
+  lines.push("1. Что ученик сказал или не сказал.");
+  lines.push("2. Почему это ошибка (что было в учебнике).");
+  lines.push("3. Как правильно.");
+  lines.push("");
+  lines.push("Пиши по пунктам. Опирайся ТОЛЬКО на данные выше. Не выдумывай факты. Не давай общих советов вроде «учи материал» — только конкретика по этому пересказу.");
+  lines.push("Формат: «Ошибка 1: ... — Правильно: ...» и так далее.");
+
+  return lines.join("\n");
 }
 async function analyze(){
   const text = tx.value, title = state.customTitle;
@@ -3230,31 +3288,82 @@ if (!useEmbFinal) {
     matchedS: s.matchedS, totalS: s.totalS,
     weight: s.weight, termCount: s.termCount
   }));
+  // === Подготовка данных для LLM (Уровень 2) ===
+  function snippetForSection(sec) {
+    const parts = [];
+    for (let j = sec.from; j < sec.to && parts.length < 3; j++) {
+      parts.push(corpusSents[j].raw);
+    }
+    return parts.join(" ").slice(0, 300);
+  }
+
+  const missedSections = secNone.map(s => ({
+    title: s.title,
+    snippet: snippetForSection(s)
+  }));
+
+  const partialSections = secPart.map(s => {
+    const blockForSec = blockMap.find(b => b.sec === s.i);
+    let spoken = null;
+    if (blockForSec) {
+      spoken = chunks.slice(blockForSec.from, blockForSec.to)
+        .map(c => c.raw).join(" ").slice(0, 200);
+    }
+    return { title: s.title, snippet: snippetForSection(s), spoken };
+  });
+
+  const dateContradictions = contradictions
+    .filter(c => c.type === "date" || c.type === "century")
+    .map(c => {
+      const m = c.msg.match(/сказано «([^»]+)», а в учебнике «([^»]+)»/);
+      if (!m) return null;
+      const [, said, correct] = m;
+      const evidence = corpusSents.find(cs => cs.raw.includes(correct))?.raw || "";
+      return { said, correct, evidence: evidence.slice(0, 200) };
+    })
+    .filter(Boolean);
+
+  const factIssuesForLlm = factIssues.map(date => {
+    const ctx = facts.dates.get(date);
+    return {
+      date,
+      evidence: ctx ? [...ctx].slice(0, 3).join(", ") : ""
+    };
+  });
+
+  const offTopic = withContent
+    .filter(c => c.best < .16 && !c.verbatim && c.content.length >= 4)
+    .slice(0, 3)
+    .map(c => ({ quote: c.raw.slice(0, 200) }));
+
+  const missingTerms = [...importantTerms]
+    .filter(t => !stuLemmaSet.has(t) && t.length >= 5)
+    .slice(0, 7);
   let llmExplanation = null;
   if (llmReady && llmEngine) {
     try {
       const prompt = buildLlmPrompt({
-        title, words, coverage, termCov,
-        secNone: secNone.map(s => s.title),
-        secPart: secPart.map(s => s.title),
-        contradictions: contradictions.map(c => c.msg),
-        factIssues,
-        good, bad,
-        studentText: text.slice(0, 1500),
-        plan
+        title, words, coverage,
+        missedSections,
+        partialSections,
+        dateContradictions,
+        factIssues: factIssuesForLlm,
+        offTopic,
+        missingTerms,
+        good,
+        studentText: text
       });
       const response = await llmEngine.chat.completions.create({
         messages: [
-          { role: "system", content: "Ты — доброжелательный учитель. Пиши по-русски, кратко и конкретно. Не выдумывай факты, опирайся только на переданные данные." },
+          { role: "system", content: "Ты — строгий, но доброжелательный учитель. Ты объясняешь ученику его ошибки, опираясь на текст учебника. Ты не выдумываешь факты и не даёшь общих советов." },
           { role: "user", content: prompt }
         ],
-        temperature: 0.3,
-        max_tokens: 600
+        temperature: 0.2,
+        max_tokens: 800
       });
       llmExplanation = response.choices[0]?.message?.content?.trim() || null;
     } catch (e) {
       console.warn("LLM generation failed:", e);
-      // Молча падаем на шаблонный разбор
     }
   }
   console.group("🔬 Отчёт о режиме анализа");
