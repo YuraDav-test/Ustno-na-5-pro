@@ -2592,6 +2592,14 @@ function buildLlmPrompt(d) {
 
   return lines.join("\n");
 }
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label}: таймаут ${ms/1000} с`)), ms)
+    )
+  ]);
+}
 async function analyze(){
   const text = tx.value, title = state.customTitle;
   const tokens = tokenize(text);
@@ -2672,7 +2680,10 @@ async function analyze(){
         embFailed = true;
         break;
       }
-      if (i % 5 === 0) window.updateAnalysisProgress?.(`Эмбеддинги учебника: ${i+1} из ${corpusSents.length}…`);
+      if (i % 5 === 0) {
+        document.getElementById("checkBtn").textContent = `Эмбеддинги учебника: ${i+1}/${corpusSents.length}…`;
+        window.updateAnalysisProgress?.(`Эмбеддинги учебника: ${i+1} из ${corpusSents.length}…`);
+      }
     }
   }
 
@@ -2764,6 +2775,7 @@ if (!useEmbFinal) {
     c.vec = mkVec(terms);
 
     if (useEmbFinal) {
+      document.getElementById("checkBtn").textContent = `Эмбеддинги пересказа: ${ci+1}/${sentTexts.length}…`;
       if (typeof window.updateAnalysisProgress === "function") {
         window.updateAnalysisProgress(`Эмбеддинги пересказа: ${ci + 1} из ${sentTexts.length}…`);
       }
@@ -3342,6 +3354,7 @@ if (!useEmbFinal) {
   let llmExplanation = null;
   if (llmReady && llmEngine) {
     try {
+      document.getElementById("checkBtn").textContent = "LLM пишет объяснение…";
       const prompt = buildLlmPrompt({
         title, words, coverage,
         missedSections,
@@ -3353,14 +3366,18 @@ if (!useEmbFinal) {
         good,
         studentText: text
       });
-      const response = await llmEngine.chat.completions.create({
-        messages: [
-          { role: "system", content: "Ты — строгий, но доброжелательный учитель. Ты объясняешь ученику его ошибки, опираясь на текст учебника. Ты не выдумываешь факты и не даёшь общих советов." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.2,
-        max_tokens: 800
-      });
+      const response = await withTimeout(
+        llmEngine.chat.completions.create({
+          messages: [
+            { role: "system", content: "Ты — строгий, но доброжелательный учитель. Ты объясняешь ученику его ошибки, опираясь на текст учебника. Ты не выдумываешь факты и не даёшь общих советов." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.2,
+          max_tokens: 400
+        }),
+        120000,
+        "LLM"
+      );
       llmExplanation = response.choices[0]?.message?.content?.trim() || null;
     } catch (e) {
       console.warn("LLM generation failed:", e);
@@ -3592,21 +3609,39 @@ $("quizNo").onclick=()=>{
 };
 $("checkBtn").onclick=async()=>{
   if(listening)stopRec();
-  const btn=$("checkBtn");btn.disabled=true;
-  const before=tx.value;
-  const fixed=fixSpelling(before);
-  if(fixed!==before){
-    const n=countWordChanges(before,fixed);
-    tx.value=fixed;updWC();
-    if(n>0)toast(`Читатель поправил ${n} распознанных слов по словарю учебника`);
+  const btn=$("checkBtn");
+  btn.disabled=true;
+  try {
+    const before=tx.value;
+    const fixed=fixSpelling(before);
+    if(fixed!==before){
+      const n=countWordChanges(before,fixed);
+      tx.value=fixed;updWC();
+      if(n>0)toast(`Читатель поправил ${n} распознанных слов по словарю учебника`);
+    }
+    const stages=[
+      "Склеиваю страницы и строю смысловую модель…",
+      "Выделяю части, термины, века и факты…",
+      "Делю ответ на предложения и блоки…",
+      "Сравниваю смысл, слова и словосочетания…"
+    ];
+    for(const sMsg of stages){
+      btn.textContent=sMsg;
+      await new Promise(r2=>setTimeout(r2,140));
+    }
+    btn.textContent = "Нейросеть думает…";
+    await new Promise(r2 => setTimeout(r2, 50));
+
+    const an = await analyze();
+    renderResults(an,null);
+  } catch (e) {
+    console.error("Ошибка проверки:", e);
+    toast("⚠️ Не удалось завершить проверку: " + (e.message || e));
+  } finally {
+    btn.textContent = "Проверить пересказ ✓";
+    btn.disabled = false;
+    updateReady();
   }
-  const stages=["Склеиваю страницы и строю смысловую модель…","Выделяю части, термины, века и факты…","Делю ответ на предложения и блоки…","Сравниваю смысл, слова и словосочетания…"];
-  for(const sMsg of stages){btn.textContent=sMsg;await new Promise(r2=>setTimeout(r2,140));}
-  const an = await analyze();
-  btn.textContent="Нейросеть думает…";
-  await new Promise(res2=>setTimeout(res2,200));
-  renderResults(an,null);
-  btn.textContent="Проверить пересказ ✓";updateReady();
 };
 $("retryBtn").onclick=()=>$("s3").scrollIntoView({behavior:"smooth"});
 $("newBtn").onclick=()=>{
