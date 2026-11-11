@@ -3366,61 +3366,60 @@ if (!useEmbFinal) {
     .slice(0, 5);   // ← 5 вместо 7
   let llmExplanation = null;
   if (llmReady && llmEngine) {
+    document.getElementById("checkBtn").textContent = "LLM пишет объяснение…";
+    const prompt = buildLlmPrompt({
+      title, words, coverage,
+      missedSections,
+      partialSections,
+      dateContradictions,
+      factIssues: factIssuesForLlm,
+      offTopic,
+      missingTerms,
+      good,
+      studentText: text
+    });
+    document.getElementById("checkBtn").textContent = "LLM пишет объяснение…";
+
+    const isFirstLlmCall = !window.__llmWarmedUp;
+    const timeoutMs = isFirstLlmCall ? 300000 : 180000;
+
+    let llmText = "";
+    const startTime = Date.now();
+
     try {
-      document.getElementById("checkBtn").textContent = "LLM пишет объяснение…";
-      const prompt = buildLlmPrompt({
-        title, words, coverage,
-        missedSections,
-        partialSections,
-        dateContradictions,
-        factIssues: factIssuesForLlm,
-        offTopic,
-        missingTerms,
-        good,
-        studentText: text
-      });
-      document.getElementById("checkBtn").textContent = "LLM пишет объяснение…";
+      const stream = await withTimeout(
+        llmEngine.chat.completions.create({
+          messages: [
+            { role: "system", content: "Ты — строгий, но доброжелательный учитель. Ты объясняешь ученику его ошибки, опираясь на текст учебника. Ты не выдумываешь факты и не даёшь общих советов." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.2,
+          max_tokens: 300,
+          stream: true
+        }),
+        timeoutMs,
+        "LLM"
+      );
 
-      const isFirstLlmCall = !window.__llmWarmedUp;
-      const timeoutMs = isFirstLlmCall ? 300000 : 180000;
-
-      let llmText = "";
-      const startTime = Date.now();
-
-      try {
-        const stream = await withTimeout(
-          llmEngine.chat.completions.create({
-            messages: [
-              { role: "system", content: "Ты — строгий, но доброжелательный учитель. Ты объясняешь ученику его ошибки, опираясь на текст учебника. Ты не выдумываешь факты и не даёшь общих советов." },
-              { role: "user", content: prompt }
-            ],
-            temperature: 0.2,
-            max_tokens: 300,
-            stream: true
-          }),
-          timeoutMs,
-          "LLM"
-        );
-
-        for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta?.content || "";
-          if (delta) {
-            llmText += delta;
-            // Показываем, сколько уже сгенерировано
-            const sec = Math.round((Date.now() - startTime) / 1000);
-            document.getElementById("checkBtn").textContent =
-              `LLM пишет… ${sec} с (${llmText.length} символов)`;
-          }
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content || "";
+        if (delta) {
+          llmText += delta;
+          // Показываем, сколько уже сгенерировано
+          const sec = Math.round((Date.now() - startTime) / 1000);
+          document.getElementById("checkBtn").textContent =
+            `LLM пишет… ${sec} с (${llmText.length} символов)`;
         }
-
-        llmExplanation = llmText.trim() || null;
-        window.__llmWarmedUp = true;
-      } catch (e) {
-        console.warn("LLM generation failed:", e);
-        // покажем пользователю явную причину, а не молчаливый fallback
-        const errEl = document.getElementById("checkHint");
-        if (errEl) errEl.textContent = "⚠ LLM не справилась за " + Math.round(timeoutMs/1000) + " с. Показан базовый разбор.";
       }
+
+      llmExplanation = llmText.trim() || null;
+      window.__llmWarmedUp = true;
+    } catch (e) {
+      console.warn("LLM generation failed:", e);
+      // покажем пользователю явную причину, а не молчаливый fallback
+      const errEl = document.getElementById("checkHint");
+      if (errEl) errEl.textContent = "⚠ LLM не справилась за " + Math.round(timeoutMs/1000) + " с. Показан базовый разбор.";
+    }
   }
   console.group("🔬 Отчёт о режиме анализа");
   console.log("modelReady:", modelReady);
