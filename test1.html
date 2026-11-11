@@ -758,6 +758,19 @@ async function loadLlmModel() {
     unloadBtn.disabled = false;
     bar.style.width = "100%";
     status.textContent = "Продвинутый разбор включён. Модель кэширована браузером, все вычисления — на устройстве.";
+    status.textContent = "Прогрев модели (30–60 с)…";
+    try {
+      await llmEngine.chat.completions.create({
+        messages: [{ role: "user", content: "Скажи одно слово: тест" }],
+        max_tokens: 5,
+        temperature: 0
+      });
+      window.__llmWarmedUp = true;
+      status.textContent = "Продвинутый разбор включён. Модель прогрета и готова.";
+    } catch (e) {
+      console.warn("Прогрев LLM не удался:", e);
+      status.textContent = "LLM загружена, но прогрев не удался. Первый разбор может быть медленным.";
+    }
     toast("✅ LLM загружена. Разбор станет подробнее.");
   } catch (e) {
     console.error("Ошибка загрузки LLM:", e);
@@ -2577,8 +2590,8 @@ function buildLlmPrompt(d) {
     lines.push("");
   }
 
-  lines.push(`ПЕРЕСКАЗ УЧЕНИКА (полностью):`);
-  lines.push(`«${d.studentText}»`);
+  lines.push(`ПЕРЕСКАЗ УЧЕНИКА (первые 800 символов):`);
+  lines.push(`«${d.studentText.slice(0, 800)}»`);
   lines.push("");
 
   lines.push("ЗАДАЧА:");
@@ -3309,12 +3322,12 @@ if (!useEmbFinal) {
     return parts.join(" ").slice(0, 300);
   }
 
-  const missedSections = secNone.map(s => ({
+  const missedSections = secNone.slice(0, 3).map(s => ({
     title: s.title,
     snippet: snippetForSection(s)
   }));
 
-  const partialSections = secPart.map(s => {
+  const partialSections = secPart.slice(0, 3).map(s => {
     const blockForSec = blockMap.find(b => b.sec === s.i);
     let spoken = null;
     if (blockForSec) {
@@ -3345,12 +3358,12 @@ if (!useEmbFinal) {
 
   const offTopic = withContent
     .filter(c => c.best < .16 && !c.verbatim && c.content.length >= 4)
-    .slice(0, 3)
-    .map(c => ({ quote: c.raw.slice(0, 200) }));
+    .slice(0, 2)   // ← 2 вместо 3
+    .map(c => ({ quote: c.raw.slice(0, 150) }));  // ← 150 вместо 200
 
   const missingTerms = [...importantTerms]
     .filter(t => !stuLemmaSet.has(t) && t.length >= 5)
-    .slice(0, 7);
+    .slice(0, 5);   // ← 5 вместо 7
   let llmExplanation = null;
   if (llmReady && llmEngine) {
     try {
@@ -3366,22 +3379,48 @@ if (!useEmbFinal) {
         good,
         studentText: text
       });
-      const response = await withTimeout(
-        llmEngine.chat.completions.create({
-          messages: [
-            { role: "system", content: "Ты — строгий, но доброжелательный учитель. Ты объясняешь ученику его ошибки, опираясь на текст учебника. Ты не выдумываешь факты и не даёшь общих советов." },
-            { role: "user", content: prompt }
-          ],
-          temperature: 0.2,
-          max_tokens: 400
-        }),
-        120000,
-        "LLM"
-      );
-      llmExplanation = response.choices[0]?.message?.content?.trim() || null;
-    } catch (e) {
-      console.warn("LLM generation failed:", e);
-    }
+      document.getElementById("checkBtn").textContent = "LLM пишет объяснение…";
+
+      const isFirstLlmCall = !window.__llmWarmedUp;
+      const timeoutMs = isFirstLlmCall ? 300000 : 180000;
+
+      let llmText = "";
+      const startTime = Date.now();
+
+      try {
+        const stream = await withTimeout(
+          llmEngine.chat.completions.create({
+            messages: [
+              { role: "system", content: "Ты — строгий, но доброжелательный учитель. Ты объясняешь ученику его ошибки, опираясь на текст учебника. Ты не выдумываешь факты и не даёшь общих советов." },
+              { role: "user", content: prompt }
+            ],
+            temperature: 0.2,
+            max_tokens: 300,
+            stream: true
+          }),
+          timeoutMs,
+          "LLM"
+        );
+
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta?.content || "";
+          if (delta) {
+            llmText += delta;
+            // Показываем, сколько уже сгенерировано
+            const sec = Math.round((Date.now() - startTime) / 1000);
+            document.getElementById("checkBtn").textContent =
+              `LLM пишет… ${sec} с (${llmText.length} символов)`;
+          }
+        }
+
+        llmExplanation = llmText.trim() || null;
+        window.__llmWarmedUp = true;
+      } catch (e) {
+        console.warn("LLM generation failed:", e);
+        // покажем пользователю явную причину, а не молчаливый fallback
+        const errEl = document.getElementById("checkHint");
+        if (errEl) errEl.textContent = "⚠ LLM не справилась за " + Math.round(timeoutMs/1000) + " с. Показан базовый разбор.";
+      }
   }
   console.group("🔬 Отчёт о режиме анализа");
   console.log("modelReady:", modelReady);
@@ -3565,6 +3604,11 @@ function renderResults(r,ov){
   if (r.llmExplanation) {
     const safe = esc(r.llmExplanation).replace(/\n/g, "</p><p>");
     summHtml = `<p><b>✨ Продвинутый разбор:</b></p><p>${safe}</p>` + summHtml;
+  } else if (llmReady && llmEngine) {
+    // Модель загружена, но объяснение не получилось
+    summHtml = `<p style="color:#a06a10;background:#fdf3dc;padding:8px 12px;border-radius:6px;font-size:13px">
+      ⚠ Продвинутый разбор не удался — модель не успела за отведённое время. Показан базовый анализ. Попробуйте нажать «Проверить пересказ» ещё раз (первый разбор часто медленнее из-за прогрева GPU).
+    </p>` + summHtml;
   }
   $("summ").innerHTML = summHtml;
   $("stuLegend").innerHTML=`<span><i class="dot" style="background:rgba(44,138,82,.35)"></i>смысл совпадает</span>
