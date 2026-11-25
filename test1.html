@@ -1191,7 +1191,14 @@ function cleanOcrText(data){
   return data.text||"";
 }
 function readDocument(text){
-  const lines=text.split(/\n+/).map(l=>l.replace(/\s+/g," ").trim()).filter(l=>l.length>0);
+  const protectDots = s => s.replace(
+    /\b([А-ЯЁA-Z]\.){1,3}\s*(?=[А-ЯЁA-Z])/g, m => m.replace(/\./g, "\u2024")
+  ).replace(
+    /\b(и|г|гг|в|вв|т|тт|п|пп|с|см|ср|др|напр|тыс|млн|млрд|руб|коп|ул|пер|обл|р|ст|до н|н э|н\.э)\./gi,
+    m => m.replace(/\./g, "\u2024")
+  );
+  const restoreDots = s => s.replace(/\u2024/g, ".");
+  const lines = protectDots(text).split(/\n+/).map(l=>l.replace(/\s+/g," ").trim()).filter(l=>l.length>0);
   if(lines.length<2)return {sections:[{heading:null,text:text.replace(/\n+/g," ").trim()}]};
   const bodyLens=lines.filter(l=>l.split(" ").length>6).map(l=>l.split(" ").length);
   const avgBodyLen=bodyLens.length?bodyLens.reduce((a,b)=>a+b,0)/bodyLens.length:14;
@@ -1226,8 +1233,11 @@ function readDocument(text){
   }
   const lastT=cur.lines.join(" ").trim();
   if(lastT)secs.push(cur);
-  const out=secs.map(s=>({heading:s.heading,text:s.lines.join(" ").trim()})).filter(s=>s.text);
-  if(!out.length)out.push({heading:null,text:text.replace(/\n+/g," ").trim()});
+  const out=secs.map(s=>({
+    heading: s.heading ? restoreDots(s.heading) : null,
+    text: restoreDots(s.lines.join(" ").trim())
+  })).filter(s=>s.text);
+  if(!out.length)out.push({heading:null,text:restoreDots(text.replace(/\n+/g," ").trim())});
   return {sections:out};
 }
 
@@ -1346,11 +1356,38 @@ function cleanW(w){return norm(w).replace(/[^а-яёa-z0-9]/g,"");}
 let speechPauseMarks=[];
 let lastFinalTs=null;
 
+const ABBREV = new Set([
+  // имена и титулы
+  "и","ио","ин","им","имени","тов","г","гг","в","вв","век","века","веков",
+  "с","см","ср","др","напр","пр","проч","т","тт","п","пп","ст","стл",
+  "ул","пер","пл","пр","обл","р","руб","коп","тыс","млн","млрд","мл",
+  // имена и отчества (короткие)
+  "иван","петр","серг","алекс","влад","ник","мих","дм","конст",
+  // типичные для истории
+  "до н","н э","н.э","до н.э","н. э","до н. э",
+  // латиница
+  "e.g","i.e","etc","vs","mr","mrs","dr","st"
+]);
+
 function restoreSentences(text, pauseMarks){
   const dotCount=(text.match(/[.!?…]+/g)||[]).length;
   const wordsCount=wc(text);
   if(wordsCount===0)return [];
-  if(dotCount>=Math.max(1,Math.floor(wordsCount/28)))return text.match(/[^.!?…]+[.!?…]*/g)||[text];
+
+  // Защищённая замена: точка, за которой идёт сокращение (1-3 буквы + точка)
+  // или одиночная буква (инициал), НЕ считается концом предложения.
+  const protectedText = text.replace(
+    /\b([А-ЯЁA-Z]\.){1,3}\s*(?=[А-ЯЁA-Z])/g,   // инициалы «А.С. Пушкин»
+    m => m.replace(/\./g, "\u2024")             // временно заменяем на ․
+  ).replace(
+    /\b(и|г|гг|в|вв|т|тт|п|пп|с|см|ср|др|напр|тыс|млн|млрд|руб|коп|ул|пер|обл|р|ст|до н|н э|н\.э)\./gi,
+    m => m.replace(/\./g, "\u2024")
+  );
+
+  if(dotCount>=Math.max(1,Math.floor(wordsCount/28))){
+    return (protectedText.match(/[^.!?…]+[.!?…]*/g)||[protectedText])
+      .map(s => s.replace(/\u2024/g, "."));
+  }
   const tokens=text.trim().split(/\s+/);
   const pauseTokenMap=new Map();
   if(pauseMarks&&pauseMarks.length){
@@ -1394,7 +1431,7 @@ function restoreSentences(text, pauseMarks){
     if(breakHere){out.push(cur.join(" "));cur=[];}
   }
   if(cur.length)out.push(cur.join(" "));
-  return out;
+  return out.map(s => s.replace(/\u2024/g, "."));
 }
 
 /* ====================================================================
@@ -2636,15 +2673,19 @@ async function analyze(){
       merged[merged.length - 1].text += " " + sg.text;
     } else merged.push({ heading: sg.heading, text: sg.text });
   });
+  const ABBREV_RE = /\b([А-ЯЁA-Z]\.){1,3}\s*(?=[А-ЯЁA-Z])|\b(и|г|гг|в|вв|т|тт|п|пп|с|см|ср|др|напр|тыс|млн|млрд|руб|коп|ул|пер|обл|р|ст|до н|н э|н\.э)\./gi;
+  const protectDots = s => s.replace(ABBREV_RE, m => m.replace(/\./g, "\u2024"));
+  const restoreDots = s => s.replace(/\u2024/g, ".");
+
   const corpusSents = []; const rawSpans = [];
   merged.forEach(m => {
     const from = corpusSents.length;
-    (m.text.match(/[^.!?…]+[.!?…]*/g) || []).forEach(raw => {
+    (protectDots(m.text).match(/[^.!?…]+[.!?…]*/g) || []).forEach(raw => {
       const toks = tokenize(raw);
       if (toks.length < 2) return;
       const terms = toks.filter(isContent).map(stem);
       const content = [...new Set(terms)];
-      corpusSents.push({ raw, toks, terms, content, wc: toks.length });
+      corpusSents.push({ raw: restoreDots(raw), toks, terms, content, wc: toks.length });
     });
     const to = corpusSents.length;
     if (to > from) rawSpans.push({ heading: m.heading, from, to });
